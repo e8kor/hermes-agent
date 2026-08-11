@@ -11240,6 +11240,26 @@ def cmd_completion(args, parser=None):
     """Print shell completion script."""
     from hermes_cli.completion import generate_bash, generate_zsh, generate_fish
 
+    # Plugin-registered top-level subcommands (hermes github, hermes linkedin,
+    # …) are only materialized into the argparse tree when discovery runs. The
+    # completion token itself is a builtin subcommand, so normal startup skips
+    # plugin discovery — which would silently omit every plugin command from
+    # the generated completion. Force registration so plugin CLI commands are
+    # suggested too. (This only adds the plugin parsers to an already-built
+    # tree; it is a no-op when none are present.)
+    if parser is not None:
+        try:
+            # Find the subparsers action on the top-level parser and hand it to
+            # the plugin-registration helper so plugin CLI commands are added.
+            subparsers = next(
+                (a for a in parser._actions if isinstance(a, argparse._SubParsersAction)),
+                None,
+            )
+            if subparsers is not None:
+                _register_plugin_cli_subcommands(subparsers)
+        except Exception:
+            pass
+
     shell = getattr(args, "shell", "bash")
     if shell == "zsh":
         print(generate_zsh(parser))
@@ -11414,6 +11434,54 @@ def _plugin_cli_discovery_needed() -> bool:
     # prompt, argparse will route it via positional handling and the
     # extra discovery cost is amortized over a full agent run anyway.
     return True
+
+
+def _register_plugin_cli_subcommands(subparsers) -> None:
+    """Materialize plugin-registered top-level CLI subcommands into *subparsers*.
+
+    Extracted from ``main()`` so ``hermes completion`` can also register plugin
+    subcommands before generating the completion script. Without this, plugin
+    CLI commands (``hermes github``, ``hermes linkedin``, …) never appear in
+    shell completion because the ``completion`` token is a builtin subcommand
+    and plugin discovery is skipped on that path.
+    """
+    try:
+        from plugins.memory import discover_plugin_cli_commands
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        seen_plugin_commands = set()
+        for cmd_info in discover_plugin_cli_commands():
+            plugin_parser = subparsers.add_parser(
+                cmd_info["name"],
+                help=cmd_info["help"],
+                description=cmd_info.get("description", ""),
+                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+            )
+            cmd_info["setup_fn"](plugin_parser)
+            if cmd_info.get("handler_fn") is not None:
+                plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+            seen_plugin_commands.add(cmd_info["name"])
+
+        discover_plugins()
+        # A bundled platform whose top-level CLI command is the one being
+        # invoked is still only a deferred entry at this point; import it
+        # so its register_cli_command side effect runs before we read
+        # _cli_commands (issue #54678).
+        _resolve_deferred_platform_cli_command(_first_positional_argv())
+        for cmd_info in get_plugin_manager()._cli_commands.values():
+            if cmd_info["name"] in seen_plugin_commands:
+                continue
+            plugin_parser = subparsers.add_parser(
+                cmd_info["name"],
+                help=cmd_info["help"],
+                description=cmd_info.get("description", ""),
+                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+            )
+            cmd_info["setup_fn"](plugin_parser)
+            if cmd_info.get("handler_fn") is not None:
+                plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
 
 
 def _resolve_deferred_platform_cli_command(command_name: str | None) -> None:
@@ -12474,43 +12542,7 @@ def main():
     # 500-650ms on typical installs.
     # =========================================================================
     if _plugin_cli_discovery_needed():
-        try:
-            from plugins.memory import discover_plugin_cli_commands
-            from hermes_cli.plugins import discover_plugins, get_plugin_manager
-
-            seen_plugin_commands = set()
-            for cmd_info in discover_plugin_cli_commands():
-                plugin_parser = subparsers.add_parser(
-                    cmd_info["name"],
-                    help=cmd_info["help"],
-                    description=cmd_info.get("description", ""),
-                    formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
-                )
-                cmd_info["setup_fn"](plugin_parser)
-                if cmd_info.get("handler_fn") is not None:
-                    plugin_parser.set_defaults(func=cmd_info["handler_fn"])
-                seen_plugin_commands.add(cmd_info["name"])
-
-            discover_plugins()
-            # A bundled platform whose top-level CLI command is the one being
-            # invoked is still only a deferred entry at this point; import it
-            # so its register_cli_command side effect runs before we read
-            # _cli_commands (issue #54678).
-            _resolve_deferred_platform_cli_command(_first_positional_argv())
-            for cmd_info in get_plugin_manager()._cli_commands.values():
-                if cmd_info["name"] in seen_plugin_commands:
-                    continue
-                plugin_parser = subparsers.add_parser(
-                    cmd_info["name"],
-                    help=cmd_info["help"],
-                    description=cmd_info.get("description", ""),
-                    formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
-                )
-                cmd_info["setup_fn"](plugin_parser)
-                if cmd_info.get("handler_fn") is not None:
-                    plugin_parser.set_defaults(func=cmd_info["handler_fn"])
-        except Exception as _exc:
-            logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
+        _register_plugin_cli_subcommands(subparsers)
 
     # =========================================================================
     # curator command — background skill maintenance

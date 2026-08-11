@@ -449,7 +449,7 @@ for _cmd in COMMAND_REGISTRY:
 # e.g. args_hint="[on|off|tts|status]" for commands that don't have explicit subcommands.
 # NOTE: If a command already has explicit subcommands, this fallback is skipped.
 # Use the `subcommands` field on CommandDef for intentional tab-completable args.
-_PIPE_SUBS_RE = re.compile(r"[a-z]+(?:\|[a-z]+)+")
+_PIPE_SUBS_RE = re.compile(r"[a-z][a-z-]*(?:\|[a-z][a-z-]*)+")
 for _cmd in COMMAND_REGISTRY:
     key = f"/{_cmd.name}"
     if key in SUBCOMMANDS or not _cmd.args_hint:
@@ -1523,6 +1523,30 @@ class SlashCommandCompleter(Completer):
         except Exception:
             return {}
 
+    def _plugin_subcommands(self, slash_command: str) -> list[str]:
+        """Return pipe-separated subcommands hinted in a plugin command's args_hint.
+
+        Plugin slash commands register an ``args_hint`` (e.g. ``"<auth|accounts|…>"``)
+        that is not folded into the static ``SUBCOMMANDS`` registry (which only
+        covers builtin commands). Parse it here so plugin subcommands get the
+        same tab-completion as builtin ones. Returns [] when the command is not
+        a plugin command or has no pipe-separated hint.
+        """
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            # Plugin command keys are stored without the leading slash
+            # (e.g. "linkedin"), while slash_command here is "/linkedin".
+            info = (get_plugin_commands() or {}).get(slash_command.lstrip("/"))
+        except Exception:
+            return []
+        if not info:
+            return []
+        hint = info.get("args_hint") or ""
+        m = _PIPE_SUBS_RE.search(hint)
+        if not m:
+            return []
+        return m.group(0).split("|")
+
     # -- stacked slash-skill completion helpers ---------------------------
 
     @staticmethod
@@ -2175,6 +2199,19 @@ class SlashCommandCompleter(Completer):
             # Static subcommand completions
             if " " not in sub_text and base_cmd in SUBCOMMANDS and self._command_allowed(base_cmd):
                 for sub in SUBCOMMANDS[base_cmd]:
+                    if sub.startswith(sub_lower) and sub != sub_lower:
+                        yield Completion(
+                            sub,
+                            start_position=-len(sub_text),
+                            display=sub,
+                        )
+
+            # Plugin-registered slash commands also carry an args_hint that may
+            # list pipe-separated subcommands (e.g. "/linkedin <auth|accounts|…>").
+            # The static SUBCOMMANDS registry only covers builtin commands, so
+            # parse the plugin's args_hint here to complete its subcommands too.
+            if " " not in sub_text:
+                for sub in self._plugin_subcommands(base_cmd):
                     if sub.startswith(sub_lower) and sub != sub_lower:
                         yield Completion(
                             sub,
