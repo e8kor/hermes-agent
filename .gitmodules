@@ -1,0 +1,3 @@
+[submodule "plugins/context_engine/lcm"]
+	path = plugins/context_engine/lcm
+	url = https://github.com/stephenschoettler/hermes-lcm.git
