@@ -377,6 +377,16 @@ export const en: Translations = {
     modelSaved: "Model updated",
     modelSelect: "Select a model",
     actions: "Actions",
+    tags: "Tags",
+    editTags: "Edit tags",
+    tagsPlaceholder: "e.g. work, coding, research",
+    tagsHint:
+      "Comma-separated. Tags group profiles below; lowercased automatically.",
+    tagsSaved: "Tags saved",
+    tagsOptional: "Tags (optional)",
+    untagged: "Untagged",
+    groupByTag: "Group by tag",
+    allTags: "All",
   },
 
   pluginsPage: {

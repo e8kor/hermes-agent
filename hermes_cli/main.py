@@ -10002,11 +10002,11 @@ def cmd_profile(args):
         # Header
         print(
             f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} "
-            f"{'Alias':<12} {'Distribution'}"
+            f"{'Alias':<12} {'Distribution':<22} {'Tags'}"
         )
         print(
             f" {'─' * 15}    {'─' * 27}    {'─' * 11}    "
-            f"{'─' * 11}    {'─' * 20}"
+            f"{'─' * 11}    {'─' * 21}    {'─' * 20}"
         )
 
         for p in profiles:
@@ -10026,7 +10026,11 @@ def cmd_profile(args):
                 dist = dist[:30]
             else:
                 dist = "—"
-            print(f"{marker}{name:<15} {model:<28} {gw:<12} {alias:<12} {dist}")
+            tags = ", ".join(p.tags) if p.tags else "—"
+            print(
+                f"{marker}{name:<15} {model:<28} {gw:<12} {alias:<12} "
+                f"{dist:<22} {tags}"
+            )
         print()
 
     elif action == "use":
@@ -10060,6 +10064,7 @@ def cmd_profile(args):
                 no_alias=no_alias,
                 no_skills=no_skills,
                 description=getattr(args, "description", None),
+                tags=getattr(args, "tags", None),
             )
             print(f"\nProfile '{name}' created at {profile_dir}")
 
@@ -10263,6 +10268,77 @@ def cmd_profile(args):
             sys.exit(0 if ok_count == 1 else 1)
         sys.exit(0 if ok_count > 0 else 1)
 
+    elif action == "tag":
+        # Read or write a profile's grouping tags. The dashboard groups
+        # profile cards by tag; an untagged profile lands in "untagged".
+        from hermes_cli import profiles as _profiles_mod
+
+        name = getattr(args, "profile_name", None)
+        raw_tags = getattr(args, "tags", []) or []
+        add_tags = getattr(args, "add", None)
+        remove_tags = getattr(args, "remove", None)
+        clear_flag = bool(getattr(args, "clear", False))
+        mutating = bool(raw_tags or add_tags or remove_tags or clear_flag)
+
+        def _profile_dir_for(profile_name: str) -> Path:
+            if _profiles_mod.normalize_profile_name(profile_name) == "default":
+                from hermes_constants import get_hermes_home as _hh
+                return Path(_hh())
+            return _profiles_mod.get_profile_dir(profile_name)
+
+        # No profile name: list every profile's tags.
+        if not name:
+            if mutating:
+                print("profile tag: profile name is required to modify tags", file=sys.stderr)
+                sys.exit(2)
+            rows = [(p.name, p.tags) for p in list_profiles()]
+            if not rows:
+                print("No profiles found.")
+                sys.exit(0)
+            width = max(len(n) for n, _ in rows)
+            for pname, ptags in rows:
+                print(f"  {pname:<{width}}  {', '.join(ptags) if ptags else '—'}")
+            sys.exit(0)
+
+        try:
+            profile_dir = _profile_dir_for(name)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not profile_dir.is_dir():
+            print(f"Error: profile '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        # Nothing to change: show the profile's current tags.
+        if not mutating:
+            current = _profiles_mod.read_profile_meta(profile_dir).get("tags", [])
+            if current:
+                print(", ".join(current))
+            else:
+                print(f"(no tags set for '{name}')")
+            sys.exit(0)
+
+        try:
+            if clear_flag:
+                _profiles_mod.write_profile_meta(profile_dir, tags=[])
+                result = []
+            elif add_tags:
+                result = _profiles_mod.add_profile_tags(profile_dir, add_tags)
+            elif remove_tags:
+                result = _profiles_mod.remove_profile_tags(profile_dir, remove_tags)
+            else:
+                result = _profiles_mod.normalize_tags(raw_tags)
+                _profiles_mod.write_profile_meta(profile_dir, tags=result)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if result:
+            print(f"Tags for '{name}': {', '.join(result)}")
+        else:
+            print(f"Tags cleared for '{name}'.")
+        sys.exit(0)
+
     elif action == "show":
         name = args.profile_name
         from hermes_cli.profiles import (
@@ -10274,6 +10350,7 @@ def cmd_profile(args):
             _read_distribution_meta,
             _get_wrapper_dir,
             find_alias_for_profile,
+            read_profile_meta,
         )
 
         if not profile_exists(name):
@@ -10285,6 +10362,7 @@ def cmd_profile(args):
         skills = _count_skills(profile_dir)
         dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
         alias_name = find_alias_for_profile(name)
+        show_meta = read_profile_meta(profile_dir)
 
         print(f"\nProfile: {name}")
         print(f"Path:    {profile_dir}")
@@ -10298,6 +10376,8 @@ def cmd_profile(args):
         print(
             f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}"
         )
+        if show_meta.get("tags"):
+            print(f"Tags:    {', '.join(show_meta['tags'])}")
         if dist_name:
             print(f"Distribution: {dist_name}@{dist_version or '?'}")
             if dist_source:

@@ -38,6 +38,7 @@ from hermes_cli.web_models import (
     ProfileRename,
     ProfileSoulUpdate,
     ProfileDescriptionUpdate,
+    ProfileTagsUpdate,
     ProfileModelUpdate,
     ProfileDescribeAuto,
     SessionPrScanBody,
@@ -813,6 +814,7 @@ async def create_profile_endpoint(body: ProfileCreate):
             clone_config=clone_config,
             no_skills=body.no_skills,
             description=body.description,
+            tags=body.tags,
         )
         # Match the CLI's profile-create flow: fresh named profiles get the
         # bundled skills installed. When cloning from default, create_profile()
@@ -1092,6 +1094,25 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
         _log.exception("PUT /api/profiles/%s/description failed", name)
         raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True, "description": text, "description_auto": False}
+
+
+@router.put("/api/profiles/{name}/tags")
+async def update_profile_tags_endpoint(name: str, body: ProfileTagsUpdate):
+    """Replace a profile's grouping tags.
+
+    Tags are normalized server-side (lowercase, punctuation folded to ``-``,
+    de-duplicated, capped) so the dashboard can send raw user input. An empty
+    list clears the tags, moving the profile into the "untagged" group.
+    """
+    from hermes_cli import profiles as profiles_mod
+    profile_dir = _resolve_profile_dir(name)
+    tags = profiles_mod.normalize_tags(body.tags)
+    try:
+        profiles_mod.write_profile_meta(profile_dir, tags=tags)
+    except Exception as e:
+        _log.exception("PUT /api/profiles/%s/tags failed", name)
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "tags": tags}
 
 
 @router.put("/api/profiles/{name}/model")

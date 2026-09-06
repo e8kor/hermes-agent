@@ -588,6 +588,9 @@ class ProfileCreate(BaseModel):
     # because skills_hub.SKILLS_DIR is import-time-bound and the HERMES_HOME
     # override can't redirect it. Returns spawned PIDs for the UI to poll.
     hub_skills: List[str] = []
+    # Grouping labels for the dashboard's profile view. Normalized server-side
+    # (lowercased, punctuation folded to '-') so the UI can pass raw input.
+    tags: List[str] = []
 
 
 class ProfileRename(BaseModel):
@@ -620,6 +623,10 @@ class ProfileActiveUpdate(BaseModel):
 
 class ProfileDescriptionUpdate(BaseModel):
     description: str = ""
+
+
+class ProfileTagsUpdate(BaseModel):
+    tags: List[str] = []
 
 
 class ProfileModelUpdate(BaseModel):

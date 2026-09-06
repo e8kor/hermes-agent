@@ -17,6 +17,7 @@ import {
   Pencil,
   Package,
   Sparkles,
+  Tag as TagIcon,
   Terminal,
   Trash2,
   Users,
@@ -44,6 +45,12 @@ import { Checkbox } from "@nous-research/ui/ui/components/checkbox";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, themedBody } from "@/lib/utils";
+import {
+  collectTags,
+  formatTagInput,
+  groupProfilesByTag,
+  parseTagInput,
+} from "@/lib/profile-tags";
 
 // Mirrors hermes_cli/profiles.py::_PROFILE_ID_RE so we can reject obviously
 // invalid names (uppercase, spaces, …) before round-tripping a doomed POST.
@@ -90,6 +97,7 @@ function ProfileActionsMenu({
   isEditingDesc,
   isEditingModel,
   isEditingSoul,
+  isEditingTags,
   labels,
   settingActive,
   onCopyCommand,
@@ -97,6 +105,7 @@ function ProfileActionsMenu({
   onEditDescription,
   onEditModel,
   onEditSoul,
+  onEditTags,
   onManageSkills,
   onRename,
   onSetActive,
@@ -185,6 +194,20 @@ function ProfileActionsMenu({
               <AlignLeft className="h-4 w-4" />
             )}
             {labels.editDescription}
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            className={itemClass}
+            onClick={run(onEditTags)}
+          >
+            {isEditingTags ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <TagIcon className="h-4 w-4" />
+            )}
+            {labels.editTags}
           </button>
 
           <button
@@ -304,6 +327,17 @@ export default function ProfilesPage() {
       modelSaved: p.modelSaved ?? "Model updated",
       modelSelect: p.modelSelect ?? "Select a model",
       actions: p.actions ?? "Actions",
+      tags: p.tags ?? "Tags",
+      editTags: p.editTags ?? "Edit tags",
+      tagsPlaceholder: p.tagsPlaceholder ?? "e.g. work, coding, research",
+      tagsHint:
+        p.tagsHint ??
+        "Comma-separated. Tags group profiles below; lowercased automatically.",
+      tagsSaved: p.tagsSaved ?? "Tags saved",
+      tagsOptional: p.tagsOptional ?? "Tags (optional)",
+      untagged: p.untagged ?? "Untagged",
+      groupByTag: p.groupByTag ?? "Group by tag",
+      allTags: p.allTags ?? "All",
       manageSkills: p.manageSkills ?? "Manage skills & tools",
       activeSetHint:
         p.activeSetHint ??
@@ -318,6 +352,7 @@ export default function ProfilesPage() {
   const [cloneAll, setCloneAll] = useState(false);
   const [noSkills, setNoSkills] = useState(false);
   const [newDescription, setNewDescription] = useState("");
+  const [newTags, setNewTags] = useState("");
   const [creating, setCreating] = useState(false);
   // Model picker (lazy-loaded the first time a picker is opened). modelChoice
   // is a "slug\u0000model" key, or "" to inherit from clone/default.
@@ -361,6 +396,13 @@ export default function ProfilesPage() {
   const [editingModelFor, setEditingModelFor] = useState<string | null>(null);
   const [modelEditChoice, setModelEditChoice] = useState("");
   const [modelSaving, setModelSaving] = useState(false);
+
+  // Inline tags editor state (comma-separated text; normalized server-side)
+  const [editingTagsFor, setEditingTagsFor] = useState<string | null>(null);
+  const [tagsText, setTagsText] = useState("");
+  const [tagsSaving, setTagsSaving] = useState(false);
+  // Tag the grid is filtered to; null = show every group.
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   // Per-profile "set active" in-flight name
   const [settingActive, setSettingActive] = useState<string | null>(null);
@@ -443,6 +485,7 @@ export default function ProfilesPage() {
         clone_all: cloning && cloneAll,
         no_skills: cloning ? false : noSkills,
         description: newDescription.trim() || undefined,
+        tags: parseTagInput(newTags),
         provider: picked?.provider,
         model: picked?.model,
       });
@@ -455,6 +498,7 @@ export default function ProfilesPage() {
       }
       setNewName("");
       setNewDescription("");
+      setNewTags("");
       setNoSkills(false);
       setCloneAll(false);
       setCloneFrom("default");
@@ -519,6 +563,7 @@ export default function ProfilesPage() {
     setEditingModelFor(null);
     setEditingDescFor(null);
     setEditingSoulFor(null);
+    setEditingTagsFor(null);
   }, []);
 
   const openSoulEditor = useCallback(
@@ -687,14 +732,68 @@ export default function ProfilesPage() {
 
   // Exactly one editor is open at a time; derive which profile + kind so a
   // single dialog can render the right body.
-  const editorName = editingModelFor ?? editingDescFor ?? editingSoulFor;
-  const editorKind: "model" | "desc" | "soul" | null = editingModelFor
+  const openTagsEditor = useCallback(
+    (p: ProfileInfo) => {
+      if (editingTagsFor === p.name) {
+        closeEditor();
+        return;
+      }
+      setEditingSoulFor(null);
+      setEditingDescFor(null);
+      setEditingModelFor(null);
+      setEditingTagsFor(p.name);
+      setTagsText(formatTagInput(p.tags));
+    },
+    [closeEditor, editingTagsFor],
+  );
+
+  const handleSaveTags = async (name: string) => {
+    setTagsSaving(true);
+    try {
+      const res = await api.updateProfileTags(name, parseTagInput(tagsText));
+      setProfiles((prev) =>
+        prev.map((p) => (p.name === name ? { ...p, tags: res.tags } : p)),
+      );
+      // A tag the filter pointed at may no longer exist on any profile.
+      setTagFilter((current) =>
+        current && !res.tags.includes(current) ? null : current,
+      );
+      showToast(`${L.tagsSaved}: ${name}`, "success");
+      setEditingTagsFor(null);
+    } catch (e) {
+      showToast(`${t.status.error}: ${e}`, "error");
+    } finally {
+      setTagsSaving(false);
+    }
+  };
+
+  const knownTags = useMemo(() => collectTags(profiles), [profiles]);
+
+  // A filter whose tag no longer exists (deleted / retagged / refetched) is
+  // treated as no filter. Derived rather than synced through an effect, so the
+  // grid never renders one frame of "0 profiles" before a correcting setState.
+  const activeTagFilter =
+    tagFilter !== null && knownTags.includes(tagFilter) ? tagFilter : null;
+
+  // Grouping is a view, not a partition: a multi-tagged profile shows up in
+  // each of its groups. The filter narrows to a single group when set.
+  const tagGroups = useMemo(() => {
+    const groups = groupProfilesByTag(profiles);
+    if (activeTagFilter === null) return groups;
+    return groups.filter((g) => g.tag === activeTagFilter);
+  }, [profiles, activeTagFilter]);
+
+  const editorName =
+    editingModelFor ?? editingDescFor ?? editingSoulFor ?? editingTagsFor;
+  const editorKind: "model" | "desc" | "soul" | "tags" | null = editingModelFor
     ? "model"
     : editingDescFor
       ? "desc"
       : editingSoulFor
         ? "soul"
-        : null;
+        : editingTagsFor
+          ? "tags"
+          : null;
   const editorModalRef = useModalBehavior({
     open: editorName != null,
     onClose: closeEditor,
@@ -1024,16 +1123,60 @@ export default function ProfilesPage() {
           </Card>
         )}
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {profiles.map((p) => {
-            const isRenaming = renamingFrom === p.name;
-            const isEditingSoul = editingSoulFor === p.name;
-            const isEditingDesc = editingDescFor === p.name;
-            const isEditingModel = editingModelFor === p.name;
-            const active = isActive(p);
-            return (
-              <Card key={p.name} className="h-full">
-                <CardContent className="flex h-full flex-col gap-2 py-4">
+        {knownTags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-muted-foreground">{L.groupByTag}:</span>
+
+            <Button
+              size="sm"
+              ghost={activeTagFilter !== null}
+              outlined={activeTagFilter === null}
+              onClick={() => setTagFilter(null)}
+            >
+              {L.allTags}
+            </Button>
+
+            {knownTags.map((tag) => (
+              <Button
+                key={tag}
+                size="sm"
+                ghost={activeTagFilter !== tag}
+                outlined={activeTagFilter === tag}
+                onClick={() =>
+                  setTagFilter(activeTagFilter === tag ? null : tag)
+                }
+              >
+                {tag}
+              </Button>
+            ))}
+          </div>
+        )}
+
+        {tagGroups.map((group) => (
+          <div
+            key={group.tag ?? "__untagged__"}
+            className="flex flex-col gap-2"
+          >
+            {knownTags.length > 0 && (
+              <H2
+                variant="sm"
+                className="flex items-center gap-2 text-muted-foreground"
+              >
+                {group.tag ?? L.untagged} ({group.profiles.length})
+              </H2>
+            )}
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {group.profiles.map((p) => {
+                const isRenaming = renamingFrom === p.name;
+                const isEditingSoul = editingSoulFor === p.name;
+                const isEditingDesc = editingDescFor === p.name;
+                const isEditingModel = editingModelFor === p.name;
+                const isEditingTags = editingTagsFor === p.name;
+                const active = isActive(p);
+                return (
+                  <Card key={p.name} className="h-full">
+                    <CardContent className="flex h-full flex-col gap-2 py-4">
                   {isRenaming ? (
                     <div className="flex flex-col gap-2">
                       <Input
@@ -1113,6 +1256,34 @@ export default function ProfilesPage() {
                             <Badge tone="outline">{t.profiles.hasEnv}</Badge>
                           )}
 
+                          {/* Clicking a card's tag filters the grid to it, so
+                              tags are a navigation affordance, not just a
+                              label. */}
+                          {(p.tags ?? []).map((tag) => (
+                            <button
+                              key={tag}
+                              type="button"
+                              title={tag}
+                              onClick={() =>
+                                setTagFilter(
+                                  activeTagFilter === tag ? null : tag,
+                                )
+                              }
+                            >
+                              <Badge
+                                tone={
+                                  activeTagFilter === tag
+                                    ? "secondary"
+                                    : "outline"
+                                }
+                                className="gap-1"
+                              >
+                                <TagIcon className="h-3 w-3" />
+                                {tag}
+                              </Badge>
+                            </button>
+                          ))}
+
                           {p.distribution_name && (
                             <Badge tone="outline" className="gap-1">
                               <Package className="h-3 w-3" />
@@ -1130,6 +1301,7 @@ export default function ProfilesPage() {
                           isEditingDesc={isEditingDesc}
                           isEditingModel={isEditingModel}
                           isEditingSoul={isEditingSoul}
+                          isEditingTags={isEditingTags}
                           settingActive={settingActive === p.name}
                           labels={{
                             actions: L.actions,
@@ -1137,6 +1309,7 @@ export default function ProfilesPage() {
                             editModel: L.editModel,
                             editDescription: L.editDescription,
                             editSoul: t.profiles.editSoul,
+                            editTags: L.editTags,
                             manageSkills: L.manageSkills,
                             openInTerminal: t.profiles.openInTerminal,
                             rename: t.profiles.rename,
@@ -1149,6 +1322,7 @@ export default function ProfilesPage() {
                           onEditDescription={() => openDescEditor(p)}
                           onEditModel={() => openModelEditor(p)}
                           onEditSoul={() => openSoulEditor(p.name)}
+                          onEditTags={() => openTagsEditor(p)}
                           onManageSkills={() =>
                             navigate(
                               `/skills?profile=${encodeURIComponent(p.name)}`,
@@ -1220,11 +1394,13 @@ export default function ProfilesPage() {
                       </div>
                     </>
                   )}
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Editor dialog — model / description / SOUL for the selected profile */}
@@ -1359,6 +1535,53 @@ export default function ProfilesPage() {
                 </>
               )}
 
+              {editorKind === "tags" && (
+                <>
+                  <Label
+                    htmlFor="profile-tags-editor"
+                    className="font-mondwest text-display text-xs tracking-wider text-muted-foreground"
+                  >
+                    {L.tags}
+                  </Label>
+
+                  <Input
+                    id="profile-tags-editor"
+                    autoFocus
+                    placeholder={L.tagsPlaceholder}
+                    value={tagsText}
+                    onChange={(e) => setTagsText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveTags(editorName);
+                    }}
+                  />
+
+                  <p className="text-xs text-muted-foreground">{L.tagsHint}</p>
+
+                  {/* Preview the canonical form so the user sees "Work Stuff"
+                      become "work-stuff" before saving, not after. */}
+                  {parseTagInput(tagsText).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {parseTagInput(tagsText).map((tag) => (
+                        <Badge key={tag} tone="outline">
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      className="uppercase"
+                      onClick={() => handleSaveTags(editorName)}
+                      disabled={tagsSaving}
+                    >
+                      {tagsSaving ? t.common.saving : t.common.save}
+                    </Button>
+                  </div>
+                </>
+              )}
+
               {editorKind === "soul" && (
                 <>
                   <Label
@@ -1402,12 +1625,14 @@ interface ProfileActionsMenuProps {
   isEditingDesc: boolean;
   isEditingModel: boolean;
   isEditingSoul: boolean;
+  isEditingTags: boolean;
   labels: {
     actions: string;
     delete: string;
     editDescription: string;
     editModel: string;
     editSoul: string;
+    editTags: string;
     manageSkills: string;
     openInTerminal: string;
     rename: string;
@@ -1419,6 +1644,7 @@ interface ProfileActionsMenuProps {
   onEditDescription: () => void;
   onEditModel: () => void;
   onEditSoul: () => void;
+  onEditTags: () => void;
   onManageSkills: () => void;
   onRename: () => void;
   onSetActive: () => void;

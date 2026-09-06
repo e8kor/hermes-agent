@@ -433,6 +433,15 @@ export interface Translations {
     actions?: string;
     manageSkills?: string;
     activeSetHint?: string;
+    tags?: string;
+    editTags?: string;
+    tagsPlaceholder?: string;
+    tagsHint?: string;
+    tagsSaved?: string;
+    tagsOptional?: string;
+    untagged?: string;
+    groupByTag?: string;
+    allTags?: string;
   };
 
   // ── Skills page ──

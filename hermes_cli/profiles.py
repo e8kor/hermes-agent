@@ -29,7 +29,7 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, List, Optional, Tuple
 
@@ -657,6 +657,10 @@ class ProfileInfo:
     # surfaces a "review" badge in this case so the user can edit or
     # accept.
     description_auto: bool = False
+    # Free-form grouping labels (e.g. ["work", "coding"]) persisted in
+    # ``<profile_dir>/profile.yaml``. The dashboard groups profile cards
+    # by tag; a profile with no tags falls into the "untagged" group.
+    tags: List[str] = field(default_factory=list)
 
 
 def _read_distribution_meta(profile_dir: Path) -> tuple:
@@ -820,28 +824,79 @@ def _profile_yaml_path(profile_dir: Path) -> Path:
     return profile_dir / "profile.yaml"
 
 
+# Tags are grouping labels, not identifiers: lowercase, no whitespace runs,
+# short enough to render as a badge. We normalize aggressively (rather than
+# rejecting) so a user typing "Work Stuff" in the dashboard gets "work-stuff"
+# instead of an error dialog.
+_TAG_MAX_LEN = 32
+_TAG_MAX_COUNT = 12
+_TAG_STRIP_RE = re.compile(r"[^a-z0-9_-]+")
+
+
+def normalize_tag(raw: str) -> str:
+    """Canonicalize one tag; returns ``""`` when nothing usable remains."""
+    tag = _TAG_STRIP_RE.sub("-", str(raw or "").strip().lower()).strip("-_")
+    return tag[:_TAG_MAX_LEN].strip("-_")
+
+
+def normalize_tags(raw) -> List[str]:
+    """Canonicalize a tag list: normalized, de-duplicated, order-preserving.
+
+    Accepts a list of strings or a comma-separated string (what the CLI's
+    ``--tags`` flag and older profile.yaml files hand us). Internal whitespace
+    inside one tag folds to ``-`` (``"Work Stuff"`` -> ``"work-stuff"``), so
+    only commas split. Never raises — a junk value yields an empty list rather
+    than breaking ``hermes profile list``.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        items = []
+        for entry in raw:
+            # Only strings carry tags. str() on anything else invents one —
+            # a None/True entry in a hand-edited profile.yaml would otherwise
+            # persist as the literal tag "none"/"true".
+            if not isinstance(entry, str):
+                continue
+            items.extend(entry.split(","))
+    else:
+        return []
+    out: List[str] = []
+    for item in items:
+        tag = normalize_tag(item)
+        if tag and tag not in out:
+            out.append(tag)
+        if len(out) >= _TAG_MAX_COUNT:
+            break
+    return out
+
+
 def read_profile_meta(profile_dir: Path) -> dict:
     """Read ``<profile_dir>/profile.yaml`` and return a dict.
 
-    Returns ``{"description": "", "description_auto": False}`` when the
-    file is missing or unreadable. Never raises — a corrupt
+    Returns ``{"description": "", "description_auto": False, "tags": []}``
+    when the file is missing or unreadable. Never raises — a corrupt
     profile.yaml on an unrelated profile must not break
     ``hermes profile list``.
     """
+    empty = {"description": "", "description_auto": False, "tags": []}
     path = _profile_yaml_path(profile_dir)
     if not path.is_file():
-        return {"description": "", "description_auto": False}
+        return dict(empty)
     try:
         import yaml
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception:
-        return {"description": "", "description_auto": False}
+        return dict(empty)
     if not isinstance(data, dict):
-        return {"description": "", "description_auto": False}
+        return dict(empty)
     return {
         "description": str(data.get("description") or "").strip(),
         "description_auto": bool(data.get("description_auto", False)),
+        "tags": normalize_tags(data.get("tags")),
     }
 
 
@@ -850,6 +905,7 @@ def write_profile_meta(
     *,
     description: Optional[str] = None,
     description_auto: Optional[bool] = None,
+    tags: Optional[List[str]] = None,
 ) -> None:
     """Update ``<profile_dir>/profile.yaml`` in place.
 
@@ -874,12 +930,31 @@ def write_profile_meta(
         existing["description"] = description.strip()
     if description_auto is not None:
         existing["description_auto"] = bool(description_auto)
+    if tags is not None:
+        existing["tags"] = normalize_tags(tags)
     # Atomic write: bare open("w") truncates before the dump, and the read
     # path above swallows parse errors as {}, so a crashed write would
     # silently drop unspecified fields on the next call (#51356, #16743).
     from utils import atomic_yaml_write
 
     atomic_yaml_write(path, existing, sort_keys=False)
+
+
+def add_profile_tags(profile_dir: Path, tags) -> List[str]:
+    """Merge ``tags`` into the profile's existing tag set; returns the result."""
+    current = read_profile_meta(profile_dir).get("tags", [])
+    merged = normalize_tags(list(current) + normalize_tags(tags))
+    write_profile_meta(profile_dir, tags=merged)
+    return merged
+
+
+def remove_profile_tags(profile_dir: Path, tags) -> List[str]:
+    """Drop ``tags`` from the profile's tag set; returns the result."""
+    current = read_profile_meta(profile_dir).get("tags", [])
+    drop = set(normalize_tags(tags))
+    remaining = [t for t in current if t not in drop]
+    write_profile_meta(profile_dir, tags=remaining)
+    return remaining
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +986,7 @@ def list_profiles() -> List[ProfileInfo]:
             distribution_source=dist_source,
             description=meta.get("description", ""),
             description_auto=meta.get("description_auto", False),
+            tags=meta.get("tags", []),
         ))
 
     # Named profiles
@@ -953,6 +1029,7 @@ def list_profiles() -> List[ProfileInfo]:
                 distribution_source=dist_source,
                 description=meta.get("description", ""),
                 description_auto=meta.get("description_auto", False),
+                tags=meta.get("tags", []),
             ))
 
     return profiles
@@ -1036,6 +1113,7 @@ def create_profile(
     no_alias: bool = False,
     no_skills: bool = False,
     description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> Path:
     """Create a new profile directory.
 
@@ -1197,15 +1275,17 @@ def create_profile(
     if not clone_all:
         _migrate_profile_config_if_outdated(profile_dir)
 
-    # Persist description if the caller provided one. Done last so a
-    # partial-create failure doesn't strand a description file in an
+    # Persist description/tags if the caller provided them. Done last so a
+    # partial-create failure doesn't strand a metadata file in an
     # incomplete profile.
-    if description and description.strip():
+    normalized_tags = normalize_tags(tags)
+    if (description and description.strip()) or normalized_tags:
         try:
             write_profile_meta(
                 profile_dir,
-                description=description.strip(),
-                description_auto=False,
+                description=description.strip() if (description and description.strip()) else None,
+                description_auto=False if (description and description.strip()) else None,
+                tags=normalized_tags or None,
             )
         except Exception:
             pass  # non-fatal — user can describe later with `hermes profile describe`

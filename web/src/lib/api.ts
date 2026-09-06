@@ -664,6 +664,7 @@ export const api = {
     clone_all?: boolean;
     no_skills?: boolean;
     description?: string;
+    tags?: string[];
     provider?: string;
     model?: string;
     mcp_servers?: McpServerCreate[];
@@ -690,6 +691,15 @@ export const api = {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ description }),
+      },
+    ),
+  updateProfileTags: (name: string, tags: string[]) =>
+    fetchJSON<{ ok: boolean; tags: string[] }>(
+      `/api/profiles/${encodeURIComponent(name)}/tags`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
       },
     ),
   describeProfileAuto: (name: string, overwrite = true) =>
@@ -2180,6 +2190,7 @@ export interface ProfileInfo {
   gateway_running: boolean;
   description: string;
   description_auto: boolean;
+  tags: string[];
   distribution_name: string | null;
   distribution_version: string | null;
   distribution_source: string | null;

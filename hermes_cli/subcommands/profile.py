@@ -62,6 +62,12 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
              "Used by the kanban decomposer to route tasks based on role instead "
              "of profile name alone. Skip and add later via `hermes profile describe`.",
     )
+    profile_create.add_argument(
+        "--tags",
+        default=None,
+        help="Comma-separated grouping tags (e.g. --tags work,coding). Tags group "
+             "profiles on the dashboard; manage later via `hermes profile tag`.",
+    )
 
     profile_delete = profile_subparsers.add_parser("delete", help="Delete a profile")
     profile_delete.add_argument("profile_name", help="Profile to delete")
@@ -101,6 +107,42 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         dest="all_missing",
         action="store_true",
         help="With --auto, run on every profile missing a description",
+    )
+
+    profile_tag = profile_subparsers.add_parser(
+        "tag",
+        help="Read or set a profile's grouping tags (used by the dashboard)",
+    )
+    profile_tag.add_argument(
+        "profile_name",
+        nargs="?",
+        default=None,
+        help="Profile to tag (omit to list every profile's tags)",
+    )
+    profile_tag.add_argument(
+        "tags",
+        nargs="*",
+        default=[],
+        help="Tags to set (comma- or space-separated). Replaces the existing "
+             "tag set. Omit to print the profile's current tags.",
+    )
+    tag_mode = profile_tag.add_mutually_exclusive_group()
+    tag_mode.add_argument(
+        "--add",
+        nargs="+",
+        metavar="TAG",
+        default=None,
+        help="Merge these tags into the existing set",
+    )
+    tag_mode.add_argument(
+        "--remove",
+        nargs="+",
+        metavar="TAG",
+        default=None,
+        help="Drop these tags from the existing set",
+    )
+    tag_mode.add_argument(
+        "--clear", action="store_true", help="Remove all tags from the profile"
     )
 
     profile_show = profile_subparsers.add_parser("show", help="Show profile details")
