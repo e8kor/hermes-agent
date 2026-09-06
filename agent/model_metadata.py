@@ -667,8 +667,47 @@ def _normalize_base_url(base_url: str) -> str:
     return (base_url or "").strip().rstrip("/")
 
 
-def _auth_headers(api_key: str = "") -> Dict[str, str]:
-    token = str(api_key or "").strip()
+def _materialized_api_key(api_key: Any) -> str:
+    """Return *api_key* as a string, minting it when it is a token provider.
+
+    Providers configured with ``key_cmd`` (and the Entra ID auth path) hand a
+    **callable** token source down from ``resolve_runtime_provider()`` — the
+    wire clients invoke it per request so the bearer is always fresh. The
+    probes in this module build ``requests`` calls by hand and hash the
+    credential for cache keys, so they need a concrete string. Passing the
+    callable through crashes on ``.encode()`` / ``.strip()`` /
+    ``.startswith()`` (``'CommandTokenSource' object has no attribute
+    'encode'``) or, worse, puts the object's repr into an
+    ``Authorization`` / ``x-api-key`` header.
+
+    Minting failures degrade to ``""`` rather than propagating: every caller
+    here is a best-effort metadata probe whose miss already falls back to a
+    cached or default context length. Raising would turn an unreachable
+    catalog into a failed session start.
+    """
+    if api_key is None:
+        return ""
+    if isinstance(api_key, str):
+        return api_key.strip()
+    if callable(api_key):
+        try:
+            minted = api_key()
+        except Exception as exc:  # noqa: BLE001 — metadata probe is best-effort
+            logger.debug("Token provider could not mint for metadata probe: %s", exc)
+            return ""
+        return minted.strip() if isinstance(minted, str) else ""
+    # Not a string, not callable, not None. Do NOT ``str()`` it: that yields
+    # "<Foo object at 0x…>", which is long enough and non-placeholder enough
+    # to pass every credential check and reach the provider verbatim.
+    logger.debug(
+        "Ignoring api_key of unsupported type %s for metadata probe",
+        type(api_key).__name__,
+    )
+    return ""
+
+
+def _auth_headers(api_key: Any = "") -> Dict[str, str]:
+    token = _materialized_api_key(api_key)
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
@@ -965,7 +1004,7 @@ def _localhost_to_ipv4(url: str) -> str:
     )
 
 
-def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
+def detect_local_server_type(base_url: str, api_key: Any = "") -> Optional[str]:
     """Detect which local server is running at base_url by probing known endpoints.
 
     Returns one of: "ollama", "lm-studio", "vllm", "llamacpp", or None.
@@ -1237,17 +1276,21 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
 
 def fetch_endpoint_model_metadata(
     base_url: str,
-    api_key: str = "",
+    api_key: Any = "",
     force_refresh: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch model metadata from an OpenAI-compatible ``/models`` endpoint.
 
     This is used for explicit custom endpoints where hardcoded global model-name
     defaults are unreliable. Results are cached in memory per base URL.
+
+    ``api_key`` accepts a callable token provider (``key_cmd`` / Entra ID);
+    it is materialized before the header is built.
     """
     normalized = _normalize_base_url(base_url)
     if not normalized or _is_openrouter_base_url(normalized):
         return {}
+    api_key = _materialized_api_key(api_key)
     _ensure_requests()
 
     if not force_refresh:
@@ -1419,7 +1462,7 @@ def fetch_endpoint_model_metadata(
 def _resolve_endpoint_context_length(
     model: str,
     base_url: str,
-    api_key: str = "",
+    api_key: Any = "",
 ) -> Optional[int]:
     """Resolve context length from an endpoint's live ``/models`` metadata."""
     endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
@@ -1820,7 +1863,7 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
     return False
 
 
-def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+def query_ollama_num_ctx(model: str, base_url: str, api_key: Any = "") -> Optional[int]:
     """Query an Ollama server for the model's context length.
 
     Returns the model's maximum context from GGUF metadata via ``/api/show``,
@@ -1886,7 +1929,7 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     return None
 
 
-def query_ollama_supports_vision(model: str, base_url: str, api_key: str = "") -> Optional[bool]:
+def query_ollama_supports_vision(model: str, base_url: str, api_key: Any = "") -> Optional[bool]:
     """Return True/False when Ollama ``/api/show`` reports vision support.
 
     Uses the ``capabilities`` field on Ollama 0.6.0+ and falls back to
@@ -1936,7 +1979,7 @@ def query_ollama_supports_vision(model: str, base_url: str, api_key: str = "") -
     return None
 
 
-def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+def _query_ollama_api_show(model: str, base_url: str, api_key: Any = "") -> Optional[int]:
     """Query an Ollama server's native ``/api/show`` for context length.
 
     Provider-agnostic: works against ANY Ollama-compatible server regardless
@@ -1978,7 +2021,7 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     return result
 
 
-def _query_ollama_api_show_uncached(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+def _query_ollama_api_show_uncached(model: str, base_url: str, api_key: Any = "") -> Optional[int]:
     """Uncached body of ``_query_ollama_api_show`` — one POST to ``/api/show``."""
     import httpx
 
@@ -2118,7 +2161,7 @@ def _model_name_suggests_stale_32k_underreport(model: str) -> bool:
     return _model_name_suggests_kimi(model) or _model_name_suggests_minimax(model)
 
 
-def _query_local_context_length(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+def _query_local_context_length(model: str, base_url: str, api_key: Any = "") -> Optional[int]:
     """Query a local server for the model's context length (short-TTL cached).
 
     The live-probe paths added for local endpoints (reconcile-on-hit and the
@@ -2152,7 +2195,7 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
     return result
 
 
-def _query_local_context_length_uncached(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+def _query_local_context_length_uncached(model: str, base_url: str, api_key: Any = "") -> Optional[int]:
     """Query a local server for the model's context length."""
     import httpx
 
@@ -2286,12 +2329,13 @@ def _normalize_model_version(model: str) -> str:
     return model.replace(".", "-")
 
 
-def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> Optional[int]:
+def _query_anthropic_context_length(model: str, base_url: str, api_key: Any) -> Optional[int]:
     """Query Anthropic's /v1/models endpoint for context length.
 
     Only works with regular ANTHROPIC_API_KEY (sk-ant-api*).
     OAuth tokens (sk-ant-oat*) from Claude Code return 401.
     """
+    api_key = _materialized_api_key(api_key)
     if not api_key or api_key.startswith("sk-ant-oat"):
         return None  # OAuth tokens can't access /v1/models
     try:
@@ -2386,7 +2430,7 @@ def _extract_chatgpt_account_id(access_token: str) -> Optional[str]:
 
 
 def _fetch_codex_oauth_context_lengths_with_source(
-    access_token: str,
+    access_token: Any,
 ) -> Tuple[Dict[str, int], bool]:
     """Fetch Codex catalogue data and report whether it came from HTTP.
 
@@ -2395,8 +2439,15 @@ def _fetch_codex_oauth_context_lengths_with_source(
     token is never retained in the cache key. The boolean is false for a
     same-token in-process hit, which must not be treated as a fresh provider
     confirmation when deciding whether to update persistent state.
+
+    ``access_token`` accepts a callable token provider (``key_cmd`` / Entra
+    ID) — it is materialized here because the fingerprint hashes the value
+    and the Authorization header interpolates it.
     """
     global _codex_oauth_context_cache
+    access_token = _materialized_api_key(access_token)
+    if not access_token:
+        return {}, False
     now = time.time()
     cache_key = _codex_oauth_token_fingerprint(access_token)
     cached = _codex_oauth_context_cache.get(cache_key)
@@ -2458,7 +2509,7 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
 
 
 def _resolve_codex_oauth_context_length_with_source(
-    model: str, access_token: str = ""
+    model: str, access_token: Any = ""
 ) -> Tuple[Optional[int], str]:
     """Resolve a Codex OAuth model's real context window.
 
@@ -2469,11 +2520,15 @@ def _resolve_codex_oauth_context_length_with_source(
     value returned by a fresh authenticated endpoint probe, ``"memory"`` for
     a same-token in-process catalogue hit, or ``"fallback"`` for the static
     conservative table. Only ``"live"`` is eligible for persistent writes.
+
+    ``access_token`` accepts a callable token provider (``key_cmd`` / Entra
+    ID); it is materialized before the fingerprint/header is built.
     """
     model_bare = _strip_provider_prefix(model).strip()
     if not model_bare:
         return None, ""
 
+    access_token = _materialized_api_key(access_token)
     if access_token:
         live, fresh_probe = _fetch_codex_oauth_context_lengths_with_source(access_token)
         live_source = "live" if fresh_probe else "memory"
@@ -2509,7 +2564,7 @@ def _resolve_codex_oauth_context_length(
 def _resolve_nous_context_length(
     model: str,
     base_url: str = "",
-    api_key: str = "",
+    api_key: Any = "",
 ) -> Tuple[Optional[int], str]:
     """Resolve Nous Portal model context length.
 
@@ -2588,7 +2643,7 @@ def _resolve_nous_context_length(
 def get_model_context_length(
     model: str,
     base_url: str = "",
-    api_key: str = "",
+    api_key: Any = "",
     config_context_length: int | None = None,
     provider: str = "",
     custom_providers: list | None = None,
@@ -2622,6 +2677,14 @@ def get_model_context_length(
     # 0. Explicit config override — user knows best
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
+
+    # ``api_key`` may arrive as a callable token provider (``key_cmd`` /
+    # Entra ID) straight from ``resolve_runtime_provider()``. Every probe
+    # below builds HTTP requests by hand and fingerprints the credential for
+    # cache keys, so materialize once here instead of at each of the ~15 call
+    # sites — a callable reaching them raised ``'CommandTokenSource' object
+    # has no attribute 'encode'`` from the Codex fingerprint helper.
+    api_key = _materialized_api_key(api_key)
 
     # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would
@@ -3118,7 +3181,7 @@ def get_model_context_length(
 async def get_model_context_length_async(
     model: str,
     base_url: str = "",
-    api_key: str = "",
+    api_key: Any = "",
     config_context_length: int | None = None,
     provider: str = "",
     custom_providers: list | None = None,
